@@ -439,17 +439,19 @@ pub struct BlocksMut<'a, P: Pixel + 'a>
 where
     <P as Pixel>::Subpixel: 'a,
 {
-    pixels: ChunksExactMut<'a, P::Subpixel>,
+    pixels: Take<StepBy<ChunksMut<'a, P::Subpixel>>>,
+    block_size: u32,
 }
 
 impl<'a, P: Pixel + 'a> BlocksMut<'a, P> {
     /// Construct the iterator from image pixels. This is not public since it has a (hidden) panic
     /// condition. The `pixels` slice must be large enough so that all pixels are addressable.
-    fn with_image(pixels: &'a mut [P::Subpixel], width: u32, height: u32) -> Self {
+    fn with_image(pixels: &'a mut [P::Subpixel], width: u32, height: u32, block_size: u32) -> Self {
         let block_len = (width as usize) * usize::from(<P as Pixel>::CHANNEL_COUNT);
         if block_len == 0 {
             BlocksMut {
-                pixels: [].chunks_exact_mut(1),
+                pixels: [].chunks_mut(1).step_by(1).take(1),
+                block_size,
             }
         } else {
             let pixels = pixels
@@ -458,7 +460,12 @@ impl<'a, P: Pixel + 'a> BlocksMut<'a, P> {
             // Blocks are physically present. In particular, height is smaller than `usize::MAX` as
             // all subpixels can be indexed.
             BlocksMut {
-                pixels: pixels.chunks_exact_mut(block_len),
+                // https://play.rust-lang.org/?version=stable&mode=debug&edition=2021&gist=841aa70883d1d82e5a71b81eae09b15a
+                pixels: pixels
+                    .chunks_mut(block_size as usize)        // striding along x
+                    .step_by((width / block_size) as usize) // jump to next row
+                    .take(block_size as usize),             // limit #rows in y
+                block_size,
             }
         }
     }
