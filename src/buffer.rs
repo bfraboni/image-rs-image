@@ -4,7 +4,8 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut, Index, IndexMut, Range};
 use std::path::Path;
-use std::slice::{ChunksExact, ChunksExactMut};
+use std::iter::{Take, StepBy};
+use std::slice::{Chunks, ChunksMut, ChunksExact, ChunksExactMut};
 
 use crate::color::{FromColor, Luma, LumaA, Rgb, Rgba};
 use crate::dynimage::{save_buffer, save_buffer_with_format, write_buffer_with_format};
@@ -325,6 +326,200 @@ where
     }
 }
 
+/// Iterate over blocks of an image
+///
+/// This iterator is created with [`ImageBuffer::blocks`]. See its document for details.
+///
+/// [`ImageBuffer::blocks`]: ../struct.ImageBuffer.html#method.blocks
+pub struct Blocks<'a, P: Pixel + 'a>
+where
+    <P as Pixel>::Subpixel: 'a,
+{
+    pixels: Take<StepBy<Chunks<'a, <P as Pixel>::Subpixel>>>,
+    block_size: u32,
+}
+
+impl<'a, P: Pixel + 'a> Blocks<'a, P> {
+    /// Construct the iterator from image pixels. This is not public since it has a (hidden) panic
+    /// condition. The `pixels` slice must be large enough so that all pixels are addressable.
+    fn with_image(pixels: &'a [P::Subpixel], width: u32, height: u32, block_size: u32) -> Self {
+        let block_len = (width as usize) * usize::from(<P as Pixel>::CHANNEL_COUNT);
+        if block_len == 0 {
+            Blocks {
+                pixels: [].chunks(1).step_by(1).take(1),
+                block_size,
+            }
+        } else {
+            let pixels = pixels
+                .get(..block_len * height as usize)
+                .expect("Pixel buffer has too few subpixels");
+            Blocks {
+                // https://play.rust-lang.org/?version=stable&mode=debug&edition=2021&gist=841aa70883d1d82e5a71b81eae09b15a
+                pixels: pixels
+                    .chunks(block_size as usize)            // striding along x
+                    .step_by((width / block_size) as usize) // jump to next row
+                    .take(block_size as usize),             // limit #rows in y
+                block_size,
+            }
+        }
+    }
+}
+
+impl<'a, P: Pixel + 'a> Iterator for Blocks<'a, P>
+where
+    P::Subpixel: 'a,
+{
+    type Item = Pixels<'a, P>;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Pixels<'a, P>> {
+        let block = self.pixels.next()?;
+        Some(Pixels {
+            // Note: this is not reached when CHANNEL_COUNT is 0.
+            chunks: block.chunks_exact(<P as Pixel>::CHANNEL_COUNT as usize),
+        })
+    }
+
+    #[inline(always)]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.len();
+        (len, Some(len))
+    }
+}
+
+impl<'a, P: Pixel + 'a> ExactSizeIterator for Blocks<'a, P>
+where
+    P::Subpixel: 'a,
+{
+    fn len(&self) -> usize {
+        self.pixels.len()
+    }
+}
+
+impl<'a, P: Pixel + 'a> DoubleEndedIterator for Blocks<'a, P>
+where
+    P::Subpixel: 'a,
+{
+    #[inline(always)]
+    fn next_back(&mut self) -> Option<Pixels<'a, P>> {
+        let block = self.pixels.next_back()?;
+        Some(Pixels {
+            // Note: this is not reached when CHANNEL_COUNT is 0.
+            chunks: block.chunks_exact(<P as Pixel>::CHANNEL_COUNT as usize),
+        })
+    }
+}
+
+impl<P: Pixel> Clone for Blocks<'_, P> {
+    fn clone(&self) -> Self {
+        Blocks {
+            pixels: self.pixels.clone(),
+            block_size: self.block_size,
+        }
+    }
+}
+
+impl<P: Pixel> fmt::Debug for Blocks<'_, P>
+where
+    P::Subpixel: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Blocks")
+            .field("pixels", &self.pixels)
+            .finish()
+    }
+}
+
+/// Iterate over mutable blocks of an image
+///
+/// This iterator is created with [`ImageBuffer::blocks_mut`]. See its document for details.
+///
+/// [`ImageBuffer::blocks_mut`]: ../struct.ImageBuffer.html#method.blocks_mut
+pub struct BlocksMut<'a, P: Pixel + 'a>
+where
+    <P as Pixel>::Subpixel: 'a,
+{
+    pixels: ChunksExactMut<'a, P::Subpixel>,
+}
+
+impl<'a, P: Pixel + 'a> BlocksMut<'a, P> {
+    /// Construct the iterator from image pixels. This is not public since it has a (hidden) panic
+    /// condition. The `pixels` slice must be large enough so that all pixels are addressable.
+    fn with_image(pixels: &'a mut [P::Subpixel], width: u32, height: u32) -> Self {
+        let block_len = (width as usize) * usize::from(<P as Pixel>::CHANNEL_COUNT);
+        if block_len == 0 {
+            BlocksMut {
+                pixels: [].chunks_exact_mut(1),
+            }
+        } else {
+            let pixels = pixels
+                .get_mut(..block_len * height as usize)
+                .expect("Pixel buffer has too few subpixels");
+            // Blocks are physically present. In particular, height is smaller than `usize::MAX` as
+            // all subpixels can be indexed.
+            BlocksMut {
+                pixels: pixels.chunks_exact_mut(block_len),
+            }
+        }
+    }
+}
+
+impl<'a, P: Pixel + 'a> Iterator for BlocksMut<'a, P>
+where
+    P::Subpixel: 'a,
+{
+    type Item = PixelsMut<'a, P>;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<PixelsMut<'a, P>> {
+        let block = self.pixels.next()?;
+        Some(PixelsMut {
+            // Note: this is not reached when CHANNEL_COUNT is 0.
+            chunks: block.chunks_exact_mut(<P as Pixel>::CHANNEL_COUNT as usize),
+        })
+    }
+
+    #[inline(always)]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.len();
+        (len, Some(len))
+    }
+}
+
+impl<'a, P: Pixel + 'a> ExactSizeIterator for BlocksMut<'a, P>
+where
+    P::Subpixel: 'a,
+{
+    fn len(&self) -> usize {
+        self.pixels.len()
+    }
+}
+
+impl<'a, P: Pixel + 'a> DoubleEndedIterator for BlocksMut<'a, P>
+where
+    P::Subpixel: 'a,
+{
+    #[inline(always)]
+    fn next_back(&mut self) -> Option<PixelsMut<'a, P>> {
+        let block = self.pixels.next_back()?;
+        Some(PixelsMut {
+            // Note: this is not reached when CHANNEL_COUNT is 0.
+            chunks: block.chunks_exact_mut(<P as Pixel>::CHANNEL_COUNT as usize),
+        })
+    }
+}
+
+impl<P: Pixel> fmt::Debug for BlocksMut<'_, P>
+where
+    P::Subpixel: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("BlocksMut")
+            .field("pixels", &self.pixels)
+            .finish()
+    }
+}
+
 /// Enumerate the pixels of an image.
 pub struct EnumeratePixels<'a, P: Pixel + 'a>
 where
@@ -457,6 +652,78 @@ where
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("EnumerateRows")
             .field("rows", &self.rows)
+            .field("y", &self.y)
+            .field("width", &self.width)
+            .finish()
+    }
+}
+
+/// Enumerate the blocks of an image.
+pub struct EnumerateBlocks<'a, P: Pixel + 'a>
+where
+    <P as Pixel>::Subpixel: 'a,
+{
+    blocks: Blocks<'a, P>,
+    y: u32,
+    width: u32,
+}
+
+impl<'a, P: Pixel + 'a> Iterator for EnumerateBlocks<'a, P>
+where
+    P::Subpixel: 'a,
+{
+    type Item = (u32, EnumeratePixels<'a, P>);
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<(u32, EnumeratePixels<'a, P>)> {
+        todo!();
+        let y = self.y;
+        self.y += 1;
+        self.blocks.next().map(|r| {
+            (
+                y,
+                EnumeratePixels {
+                    x: 0,
+                    y,
+                    width: self.width,
+                    pixels: r,
+                },
+            )
+        })
+    }
+
+    #[inline(always)]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let len = self.len();
+        (len, Some(len))
+    }
+}
+
+impl<'a, P: Pixel + 'a> ExactSizeIterator for EnumerateBlocks<'a, P>
+where
+    P::Subpixel: 'a,
+{
+    fn len(&self) -> usize {
+        self.blocks.len()
+    }
+}
+
+impl<P: Pixel> Clone for EnumerateBlocks<'_, P> {
+    fn clone(&self) -> Self {
+        EnumerateBlocks {
+            blocks: self.blocks.clone(),
+            ..*self
+        }
+    }
+}
+
+impl<P: Pixel> fmt::Debug for EnumerateBlocks<'_, P>
+where
+    P::Subpixel: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("EnumerateBlocks")
+            .field("blocks", &self.blocks)
             .field("y", &self.y)
             .field("width", &self.width)
             .finish()
@@ -753,6 +1020,26 @@ where
     pub fn enumerate_rows(&self) -> EnumerateRows<P> {
         EnumerateRows {
             rows: self.rows(),
+            y: 0,
+            width: self.width,
+        }
+    }
+
+    /// Returns an iterator over the blocks of this image.
+    ///
+    /// Only non-empty blocks can be iterated in this manner. In particular the iterator will not
+    /// yield any item when the width of the image is `0` or a pixel type without any channels is
+    /// used. This ensures that its length can always be represented by `usize`.
+    pub fn blocks(&self, size: u32) -> Blocks<P> {
+        Blocks::with_image(&self.data, self.width, self.height, size)
+    }
+
+    /// Enumerates over the blocks of the image.
+    /// The iterator yields the y-coordinate of each block
+    /// along with a reference to them.
+    pub fn enumerate_blocks(&self, size: u32) -> EnumerateBlocks<P> {
+        EnumerateBlocks {
+            blocks: self.blocks(size),
             y: 0,
             width: self.width,
         }
@@ -1640,6 +1927,10 @@ mod test {
         assert_eq!(iter.size_hint(), (exact_len, Some(exact_len)));
 
         let iter = image.rows_mut();
+        let exact_len = ExactSizeIterator::len(&iter);
+        assert_eq!(iter.size_hint(), (exact_len, Some(exact_len)));
+
+        let iter = image.blocks(4);
         let exact_len = ExactSizeIterator::len(&iter);
         assert_eq!(iter.size_hint(), (exact_len, Some(exact_len)));
 

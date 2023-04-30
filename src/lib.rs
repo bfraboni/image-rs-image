@@ -157,7 +157,7 @@ pub mod buffer {
     // Only those not exported at the top-level
     pub use crate::buffer_::{
         ConvertBuffer, EnumeratePixels, EnumeratePixelsMut, EnumerateRows, EnumerateRowsMut,
-        Pixels, PixelsMut, Rows, RowsMut,
+        Pixels, PixelsMut, Rows, RowsMut, Blocks, BlocksMut
     };
 }
 
